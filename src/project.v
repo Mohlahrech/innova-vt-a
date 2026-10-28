@@ -30,10 +30,18 @@ module tt_um_innova_pwm (
   // Keeps their zero-detect short enough for 10 ns.
   localparam PRESCALE_WIDTH = $clog2(PRESCALE * 8 + 1);
 
-  // Registered reset: rst_n reaches one flop instead of fanning out across the
+  // Registered reset: rst_n reaches a few flops instead of fanning out across the
   // whole design straight from the pin (that path missed 10 ns at the slow corner).
-  reg rst;
-  always @(posedge clk) rst <= !rst_n;
+  // Four kept copies, one per group of flops, so no single reset net drives ~190
+  // flops through a deep buffer tree (the 1x1 slow-corner critical path).
+  (* keep *) reg rst_uart;
+  (* keep *) reg rst_ctrl;
+  (* keep *) reg [1:0] rst_duty;
+  always @(posedge clk) begin
+    rst_uart <= !rst_n;
+    rst_ctrl <= !rst_n;
+    rst_duty <= {2{!rst_n}};
+  end
 
   wire [7:0] rx_data;
   wire       rx_valid;
@@ -42,7 +50,7 @@ module tt_um_innova_pwm (
   // Echo: every received byte goes straight back out.
   uart #(.DATA_WIDTH(8), .PRESCALE_WIDTH(PRESCALE_WIDTH)) uart_inst (
       .clk(clk),
-      .rst(rst),
+      .rst(rst_uart),
       .s_axis_tdata(rx_data),
       .s_axis_tvalid(rx_valid),
       .s_axis_tready(),
@@ -58,20 +66,20 @@ module tt_um_innova_pwm (
       .prescale(PRESCALE)
   );
 
-  reg [7:0] duty [0:NUM_CH-1];
+  reg [8*NUM_CH-1:0] duty;  // channel g is duty[8*g +: 8]
   reg [3:0] sel;
   reg       have_sel;
   reg [7:0] counter;
   reg       pwm_tick;  // counter steps every other clock, so PWM stays at CLK_HZ / 512
 
-  integer i;
+  wire duty_write = rx_valid && !rx_data[7] && have_sel;
+
   always @(posedge clk) begin
-    if (rst) begin
+    if (rst_ctrl) begin
       have_sel <= 1'b0;
       sel      <= 4'd0;
       counter  <= 8'd0;
       pwm_tick <= 1'b0;
-      for (i = 0; i < NUM_CH; i = i + 1) duty[i] <= 8'd0;
     end else begin
       pwm_tick <= !pwm_tick;
       if (pwm_tick) counter <= counter + 8'd1;
@@ -80,7 +88,6 @@ module tt_um_innova_pwm (
           sel      <= rx_data[3:0];
           have_sel <= 1'b1;
         end else if (have_sel) begin
-          if (sel < NUM_CH) duty[sel] <= {rx_data[6:0], rx_data[6]};
           have_sel <= 1'b0;
         end
       end
@@ -93,7 +100,11 @@ module tt_um_innova_pwm (
   genvar g;
   generate
     for (g = 0; g < NUM_CH; g = g + 1) begin : ch
-      always @(posedge clk) pwm[g] <= counter < duty[g];
+      always @(posedge clk) begin
+        if (rst_duty[g / 8]) duty[8*g +: 8] <= 8'd0;
+        else if (duty_write && sel == g) duty[8*g +: 8] <= {rx_data[6:0], rx_data[6]};
+      end
+      always @(posedge clk) pwm[g] <= counter < duty[8*g +: 8];
     end
   endgenerate
 
