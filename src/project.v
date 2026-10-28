@@ -30,7 +30,10 @@ module tt_um_innova_pwm (
   // Keeps their zero-detect short enough for 10 ns.
   localparam PRESCALE_WIDTH = $clog2(PRESCALE * 8 + 1);
 
-  wire rst = !rst_n;
+  // Registered reset: rst_n reaches one flop instead of fanning out across the
+  // whole design straight from the pin (that path missed 10 ns at the slow corner).
+  reg rst;
+  always @(posedge clk) rst <= !rst_n;
 
   wire [7:0] rx_data;
   wire       rx_valid;
@@ -84,11 +87,13 @@ module tt_um_innova_pwm (
     end
   end
 
-  wire [NUM_CH-1:0] pwm;
+  // PWM outputs are registered so the compare doesn't drive the pins directly;
+  // this delays every edge by one clock and leaves duty and period unchanged.
+  reg [NUM_CH-1:0] pwm;
   genvar g;
   generate
     for (g = 0; g < NUM_CH; g = g + 1) begin : ch
-      assign pwm[g] = counter < duty[g];
+      always @(posedge clk) pwm[g] <= counter < duty[g];
     end
   endgenerate
 
