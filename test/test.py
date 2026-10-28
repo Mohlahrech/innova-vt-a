@@ -4,9 +4,15 @@
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
+from cocotb.utils import get_sim_time
 
-# Cycles per UART bit: prescale * 8, with prescale = 50 MHz / (115200 * 8) = 54.
-BIT_CYCLES = 54 * 8
+CLK_NS = 10  # 100 MHz
+
+# Cycles per UART bit: prescale * 8, with prescale = 100 MHz / (115200 * 8) = 108.
+BIT_CYCLES = 108 * 8
+
+# PWM period is the same 5.12 us it was at 50 MHz: 256 steps, one step every 2 clocks.
+PWM_PERIOD_NS = 5120
 
 
 async def send_byte(dut, value):
@@ -15,6 +21,37 @@ async def send_byte(dut, value):
     for b in bits:
         dut.ui_in.value = b << 3
         await ClockCycles(dut.clk, BIT_CYCLES)
+
+
+async def uart_monitor(dut, received):
+    """Decode 8N1 frames on uio_out[0] (TX) into `received`."""
+    while True:
+        await ClockCycles(dut.clk, 1)
+        if int(dut.uio_out.value) & 1:
+            continue
+        await ClockCycles(dut.clk, BIT_CYCLES // 2)
+        if int(dut.uio_out.value) & 1:
+            continue  # glitch, not a start bit
+        value = 0
+        for i in range(8):
+            await ClockCycles(dut.clk, BIT_CYCLES)
+            value |= (int(dut.uio_out.value) & 1) << i
+        await ClockCycles(dut.clk, BIT_CYCLES)
+        assert int(dut.uio_out.value) & 1, "TX stop bit must be high"
+        received.append(value)
+
+
+async def period_ns(dut, bit):
+    """Time between two rising edges of a uo_out bit."""
+    edges = []
+    prev = (int(dut.uo_out.value) >> bit) & 1
+    while len(edges) < 2:
+        await ClockCycles(dut.clk, 1)
+        cur = (int(dut.uo_out.value) >> bit) & 1
+        if cur and not prev:
+            edges.append(get_sim_time(unit="ns"))
+        prev = cur
+    return edges[1] - edges[0]
 
 
 async def duty_of(dut, bit, cycles=512):
@@ -30,7 +67,7 @@ async def duty_of(dut, bit, cycles=512):
 async def test_project(dut):
     dut._log.info("Start")
 
-    clock = Clock(dut.clk, 20, unit="ns")
+    clock = Clock(dut.clk, CLK_NS, unit="ns")
     cocotb.start_soon(clock.start())
 
     dut.ena.value = 1
@@ -42,6 +79,9 @@ async def test_project(dut):
     await ClockCycles(dut.clk, BIT_CYCLES)
 
     assert await duty_of(dut, 0) == 0, "channel 0 must be off after reset"
+
+    echoed = []
+    cocotb.start_soon(uart_monitor(dut, echoed))
 
     # Channel 0 to full scale, channel 2 to about half.
     await send_byte(dut, 0x80)
@@ -57,3 +97,10 @@ async def test_project(dut):
     assert full > 0.95
     assert 0.45 < half < 0.55
     assert off == 0
+
+    period = await period_ns(dut, 2)
+    dut._log.info(f"PWM period {period} ns")
+    assert period == PWM_PERIOD_NS
+
+    await ClockCycles(dut.clk, BIT_CYCLES * 10)  # let the last echo finish
+    assert echoed == [0x80, 0x7F, 0x82, 0x40], f"echo mismatch: {echoed}"
