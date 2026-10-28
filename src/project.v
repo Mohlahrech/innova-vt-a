@@ -61,20 +61,17 @@ module tt_um_innova_pwm (
   reg [7:0] duty [0:NUM_CH-1];
   reg [3:0] sel;
   reg       have_sel;
-  reg [7:0] counter;
-  reg       pwm_tick;  // counter steps every other clock, so PWM stays at CLK_HZ / 512
+  reg       pwm_tick;  // PWM counters step every other clock, so PWM stays at CLK_HZ / 512
 
   integer i;
   always @(posedge clk) begin
     if (rst) begin
       have_sel <= 1'b0;
       sel      <= 4'd0;
-      counter  <= 8'd0;
       pwm_tick <= 1'b0;
       for (i = 0; i < NUM_CH; i = i + 1) duty[i] <= 8'd0;
     end else begin
       pwm_tick <= !pwm_tick;
-      if (pwm_tick) counter <= counter + 8'd1;
       if (rx_valid) begin
         if (rx_data[7]) begin
           sel      <= rx_data[3:0];
@@ -89,11 +86,22 @@ module tt_um_innova_pwm (
 
   // PWM outputs are registered so the compare doesn't drive the pins directly;
   // this delays every edge by one clock and leaves duty and period unchanged.
+  // Each group of 5 channels compares against its own copy of the counter, so no
+  // counter bit drives all 15 comparators (that fanout set the 10 ns critical path).
+  localparam CH_PER_COPY = 5;
+  localparam NUM_COPIES  = NUM_CH / CH_PER_COPY;
+  reg [8*NUM_COPIES-1:0] counter;  // NUM_COPIES identical 8-bit counters
   reg [NUM_CH-1:0] pwm;
   genvar g;
   generate
+    for (g = 0; g < NUM_COPIES; g = g + 1) begin : cnt
+      always @(posedge clk) begin
+        if (rst) counter[8*g +: 8] <= 8'd0;
+        else if (pwm_tick) counter[8*g +: 8] <= counter[8*g +: 8] + 8'd1;
+      end
+    end
     for (g = 0; g < NUM_CH; g = g + 1) begin : ch
-      always @(posedge clk) pwm[g] <= counter < duty[g];
+      always @(posedge clk) pwm[g] <= counter[8*(g / CH_PER_COPY) +: 8] < duty[g];
     end
   endgenerate
 
