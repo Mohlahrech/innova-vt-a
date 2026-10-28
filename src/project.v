@@ -58,7 +58,7 @@ module tt_um_innova_pwm (
       .prescale(PRESCALE)
   );
 
-  reg [7:0] duty [0:NUM_CH-1];
+  reg [6:0] duty [0:NUM_CH-1];  // 7-bit duty; the 8-bit value is {duty, duty[6]}
   reg [3:0] sel;
   reg       have_sel;
   reg [7:0] counter;
@@ -71,7 +71,7 @@ module tt_um_innova_pwm (
       sel      <= 4'd0;
       counter  <= 8'd0;
       pwm_tick <= 1'b0;
-      for (i = 0; i < NUM_CH; i = i + 1) duty[i] <= 8'd0;
+      for (i = 0; i < NUM_CH; i = i + 1) duty[i] <= 7'd0;
     end else begin
       pwm_tick <= !pwm_tick;
       if (pwm_tick) counter <= counter + 8'd1;
@@ -80,7 +80,7 @@ module tt_um_innova_pwm (
           sel      <= rx_data[3:0];
           have_sel <= 1'b1;
         end else if (have_sel) begin
-          if (sel < NUM_CH) duty[sel] <= {rx_data[6:0], rx_data[6]};
+          if (sel < NUM_CH) duty[sel] <= rx_data[6:0];
           have_sel <= 1'b0;
         end
       end
@@ -93,7 +93,7 @@ module tt_um_innova_pwm (
   genvar g;
   generate
     for (g = 0; g < NUM_CH; g = g + 1) begin : ch
-      always @(posedge clk) pwm[g] <= counter < duty[g];
+      always @(posedge clk) pwm[g] <= counter < {duty[g], duty[g][6]};
     end
   endgenerate
 
